@@ -121,6 +121,7 @@ Enables remote access when the daemon is behind a firewall.
 - Client and daemon channels with identical API (`createClientChannel`, `createDaemonChannel`)
 - Pairing via QR code transfers the daemon's public key to the client
 - Self-hosted relays opt into TLS with `daemon.relay.useTls` or `PASEO_RELAY_USE_TLS=true`; the public (client-facing) TLS setting can be overridden independently via `daemon.relay.publicUseTls` or `PASEO_RELAY_PUBLIC_USE_TLS`
+- A self-hostable **Node.js alternative** — `packages/relay-node` (`@getpaseo/relay-node`) — mirrors the same wire protocol for networks where Cloudflare is unreachable, or when you prefer to self-host. It speaks plain `ws` behind a TLS reverse proxy and is a drop-in: point the daemon/app relay endpoint at it. See [relay-node.md](relay-node.md)
 
 See [SECURITY.md](../SECURITY.md) for the full threat model.
 

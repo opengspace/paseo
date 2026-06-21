@@ -29,6 +29,7 @@
     "packages/server",
     "packages/app",
     "packages/relay",
+    "packages/relay-node",
     "packages/website",
     "packages/desktop",
     "packages/cli"

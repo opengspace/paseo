@@ -12,6 +12,7 @@ This is an npm workspace monorepo:
 - `packages/app` — Mobile + web client (Expo)
 - `packages/cli` — Docker-style CLI (`paseo run/ls/logs/wait`)
 - `packages/relay` — E2E encrypted relay for remote access
+- `packages/relay-node` — Self-hostable Node.js relay (Cloudflare-relay alternative)
 - `packages/desktop` — Electron desktop wrapper
 - `packages/website` — Marketing site (paseo.sh)
 
@@ -46,6 +47,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/android.md](docs/android.md)                             | App variants, local/cloud builds, EAS workflows                                                                                |
 | [docs/release.md](docs/release.md)                             | Release playbook, draft releases, completion checklist                                                                         |
 | [docs/terminal-activity.md](docs/terminal-activity.md)         | Terminal activity indicators — source-agnostic tracker, agent hook reporting, adding a new hook provider                       |
+| [docs/relay-node.md](docs/relay-node.md)                       | Self-hosting the Node.js relay (Cloudflare alternative), reverse-proxy TLS deploy, config reference                            |
 | [SECURITY.md](SECURITY.md)                                     | Relay threat model, E2E encryption, DNS rebinding, agent auth                                                                  |
 
 ## Quick start
