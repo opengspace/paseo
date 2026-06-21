@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+src/**/*.test.ts
+Dockerfile
+docker-compose.yml
+.dockerignore
+tsconfig.json

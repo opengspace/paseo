@@ -1,0 +1,46 @@
+{
+  "name": "@getpaseo/relay-node",
+  "version": "0.1.98",
+  "description": "Self-hostable Node.js relay for Paseo — a protocol-compatible alternative to the Cloudflare relay",
+  "bin": {
+    "paseo-relay-node": "./dist/bin/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "node": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-package-dist.mjs",
+    "build": "tsc -p tsconfig.json --incremental false",
+    "build:clean": "npm run clean && npm run build",
+    "prepack": "npm run build:clean",
+    "typecheck": "tsgo --noEmit",
+    "start": "node dist/bin/cli.js",
+    "dev": "tsx watch src/bin/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.9.0",
+    "@types/ws": "^8.5.8",
+    "tsx": "^4.6.0",
+    "typescript": "^5.2.2",
+    "vitest": "^4.1.6"
+  }
+}
