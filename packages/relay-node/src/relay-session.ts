@@ -202,7 +202,7 @@ export class RelaySession {
       return;
     }
 
-    const version = attachment.version ?? LEGACY_RELAY_VERSION;
+    const version = attachment.version;
     const role = attachment.role;
     const connectionId = attachment.connectionId ?? null;
     this.deps.logger.info(
