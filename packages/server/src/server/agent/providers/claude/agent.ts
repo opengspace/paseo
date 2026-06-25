@@ -11,7 +11,6 @@ import {
   type PermissionResult,
   type PermissionUpdate,
   type Query,
-  type SDKControlGetContextUsageResponse,
   type SDKMessage,
   type SDKPartialAssistantMessage,
   type SDKResultMessage,
@@ -36,10 +35,8 @@ import { buildClaudeFeatures, claudeModelSupportsFastMode } from "./feature-defi
 import {
   buildBinaryDiagnosticRows,
   buildCommandResolutionDiagnosticRows,
-  formatDiagnosticStatus,
   formatProviderDiagnostic,
   formatProviderDiagnosticError,
-  toDiagnosticErrorMessage,
 } from "../diagnostic-utils.js";
 import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../provider-runner.js";
 import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
@@ -59,7 +56,6 @@ import {
   type AgentLaunchContext,
   type AgentMetadata,
   type AgentMode,
-  type AgentModelDefinition,
   type AgentPermissionRequest,
   type AgentPermissionRequestKind,
   type AgentPermissionResponse,
@@ -76,12 +72,13 @@ import {
   type AgentTimelineItem,
   type AgentUsage,
   type AgentRuntimeInfo,
+  type FetchCatalogOptions,
   type ImportableProviderSession,
   type ImportProviderSessionContext,
   type ImportProviderSessionInput,
   type ListImportableSessionsOptions,
-  type ListModelsOptions,
   type McpServerConfig,
+  type ProviderCatalog,
 } from "../../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
 import {
@@ -1421,9 +1418,10 @@ export class ClaudeAgentClient implements AgentClient {
     });
   }
 
-  async listModels(_options: ListModelsOptions): Promise<AgentModelDefinition[]> {
+  async fetchCatalog(_options: FetchCatalogOptions): Promise<ProviderCatalog> {
     // Claude exposes a global catalog here; cwd/force are intentionally irrelevant.
-    return await getClaudeModelsWithSettings(this.logger, this.configDir);
+    const models = await getClaudeModelsWithSettings(this.logger, this.configDir);
+    return { models, modes: DEFAULT_MODES };
   }
 
   async listFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
@@ -1477,28 +1475,9 @@ export class ClaudeAgentClient implements AgentClient {
         defaultBinary: "claude",
       });
       const availability = await checkProviderLaunchAvailable(launch);
-      const available = availability.available;
-      const auth = available
+      const auth = availability.available
         ? await resolveClaudeAuth(launch, availability, this.runtimeSettings)
         : null;
-      let modelsValue = "Not checked";
-      let status = formatDiagnosticStatus(available);
-
-      if (available) {
-        try {
-          const models = await this.listModels({
-            cwd: os.homedir(),
-            force: false,
-          });
-          modelsValue = String(models.length);
-        } catch (error) {
-          modelsValue = `Error - ${toDiagnosticErrorMessage(error)}`;
-          status = formatDiagnosticStatus(available, {
-            source: "model fetch",
-            cause: error,
-          });
-        }
-      }
 
       return {
         diagnostic: formatProviderDiagnostic("Claude Code", [
@@ -1507,8 +1486,6 @@ export class ClaudeAgentClient implements AgentClient {
           })),
           ...(await buildBinaryDiagnosticRows(launch, availability)),
           ...(auth ? [{ label: "Auth", value: auth }] : []),
-          { label: "Models", value: modelsValue },
-          { label: "Status", value: status },
         ]),
       };
     } catch (error) {
@@ -1704,31 +1681,6 @@ function readLegacyResultUsageTokens(usage: unknown): number | undefined {
   return usageRecord ? readUsageTokenTotal(usageRecord) : undefined;
 }
 
-interface ClaudeCurrentContextUsage {
-  totalTokens: number;
-  maxTokens?: number;
-}
-
-function readCurrentContextUsage(
-  value: SDKControlGetContextUsageResponse | unknown,
-): ClaudeCurrentContextUsage | undefined {
-  const record = toObjectRecord(value);
-  if (!record) {
-    return undefined;
-  }
-  const totalTokens = record.totalTokens;
-  if (typeof totalTokens !== "number" || !Number.isFinite(totalTokens) || totalTokens < 0) {
-    return undefined;
-  }
-  const maxTokens = record.maxTokens;
-  return {
-    totalTokens,
-    ...(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0
-      ? { maxTokens }
-      : {}),
-  };
-}
-
 function isClaudeSubagentToolName(name: string | undefined): boolean {
   return name === "Task" || name === "Agent";
 }
@@ -1737,6 +1689,7 @@ class ClaudeContextUsageState {
   private contextWindowMaxTokens: number | undefined;
   private streamRequestInputTokens: number | undefined;
   private streamRequestOutputTokens: number | undefined;
+  private compactedContextWindowUsedTokens: number | undefined;
   private completedResultTurns = 0;
 
   constructor(initialContextWindowMaxTokens?: number) {
@@ -1746,6 +1699,7 @@ class ClaudeContextUsageState {
   beginTurn(): void {
     this.streamRequestInputTokens = undefined;
     this.streamRequestOutputTokens = undefined;
+    this.compactedContextWindowUsedTokens = undefined;
   }
 
   setInitialContextWindowMaxTokens(contextWindowMaxTokens: number | undefined): void {
@@ -1758,12 +1712,6 @@ class ClaudeContextUsageState {
       this.contextWindowMaxTokens = contextWindowMaxTokens;
     }
     return this.contextWindowMaxTokens;
-  }
-
-  recordCurrentContextUsage(usage: ClaudeCurrentContextUsage | undefined): void {
-    if (usage?.maxTokens !== undefined) {
-      this.contextWindowMaxTokens = usage.maxTokens;
-    }
   }
 
   buildStreamUsageEvent(event: unknown): AgentStreamEvent | null {
@@ -1796,11 +1744,7 @@ class ClaudeContextUsageState {
     return this.createUsageUpdatedEvent(usedTokens);
   }
 
-  buildResultUsage(
-    message: SDKResultMessage,
-    modelUsage: unknown,
-    currentContextUsage: ClaudeCurrentContextUsage | undefined,
-  ): AgentUsage | undefined {
+  buildResultUsage(message: SDKResultMessage, modelUsage: unknown): AgentUsage | undefined {
     try {
       if (!message.usage) {
         return undefined;
@@ -1813,7 +1757,6 @@ class ClaudeContextUsageState {
       };
 
       const modelContextWindowMaxTokens = this.recordModelUsage(modelUsage ?? message.modelUsage);
-      this.recordCurrentContextUsage(currentContextUsage);
       if (this.contextWindowMaxTokens !== undefined) {
         usage.contextWindowMaxTokens = this.contextWindowMaxTokens;
       } else if (modelContextWindowMaxTokens !== undefined) {
@@ -1824,12 +1767,13 @@ class ClaudeContextUsageState {
         readActiveUsageTokens(message.usage) ??
         (this.completedResultTurns === 0 ? readLegacyResultUsageTokens(message.usage) : undefined);
       const usedTokens =
-        currentContextUsage?.totalTokens ?? this.streamUsedTokens() ?? activeResultUsageTokens;
+        this.streamUsedTokens() ?? activeResultUsageTokens ?? this.compactedContextWindowUsedTokens;
       if (usedTokens !== undefined) {
         usage.contextWindowUsedTokens = usedTokens;
       }
       return usage;
     } finally {
+      this.compactedContextWindowUsedTokens = undefined;
       this.completedResultTurns += 1;
     }
   }
@@ -1841,7 +1785,8 @@ class ClaudeContextUsageState {
     ) {
       return undefined;
     }
-    return this.streamRequestInputTokens + this.streamRequestOutputTokens;
+    const usedTokens = this.streamRequestInputTokens + this.streamRequestOutputTokens;
+    return usedTokens > 0 ? usedTokens : undefined;
   }
 
   private createUsageUpdatedEvent(contextWindowUsedTokens: number): AgentStreamEvent {
@@ -1850,6 +1795,24 @@ class ClaudeContextUsageState {
     };
     if (this.contextWindowMaxTokens !== undefined) {
       usage.contextWindowMaxTokens = this.contextWindowMaxTokens;
+    }
+    return {
+      type: "usage_updated",
+      provider: "claude",
+      usage,
+    };
+  }
+
+  buildCompactionUsageEvent(postTokens: number | undefined): AgentStreamEvent {
+    this.streamRequestInputTokens = undefined;
+    this.streamRequestOutputTokens = undefined;
+    this.compactedContextWindowUsedTokens = postTokens;
+    const usage: AgentUsage = {};
+    if (this.contextWindowMaxTokens !== undefined) {
+      usage.contextWindowMaxTokens = this.contextWindowMaxTokens;
+    }
+    if (postTokens !== undefined) {
+      usage.contextWindowUsedTokens = postTokens;
     }
     return {
       type: "usage_updated",
@@ -3304,7 +3267,7 @@ class ClaudeAgentSession implements AgentSession {
       if (await this.handleMissingResumedConversation(message, activeQuery)) {
         return true;
       }
-      await this.routeSdkMessageFromPump(message, activeQuery);
+      await this.routeSdkMessageFromPump(message);
       return false;
     };
     const drainActiveQuery = async (): Promise<boolean> => {
@@ -3380,7 +3343,7 @@ class ClaudeAgentSession implements AgentSession {
     );
   }
 
-  private async routeSdkMessageFromPump(message: SDKMessage, activeQuery: Query): Promise<void> {
+  private async routeSdkMessageFromPump(message: SDKMessage): Promise<void> {
     if (this.shouldSuppressStaleResult(message)) {
       return;
     }
@@ -3410,12 +3373,7 @@ class ClaudeAgentSession implements AgentSession {
       "provider.claude.parsed_event",
     );
 
-    const events = await this.buildPumpedMessageEvents(
-      message,
-      activeQuery,
-      identifiers.messageId,
-      turnId,
-    );
+    const events = await this.buildPumpedMessageEvents(message, identifiers.messageId, turnId);
 
     if (events.length === 0) {
       return;
@@ -3452,18 +3410,12 @@ class ClaudeAgentSession implements AgentSession {
 
   private async buildPumpedMessageEvents(
     message: SDKMessage,
-    activeQuery: Query,
     messageIdHint: string | null,
     turnId: string | null,
   ): Promise<AgentStreamEvent[]> {
-    const currentContextUsage =
-      message.type === "result" && message.subtype === "success"
-        ? await this.queryCurrentContextUsage(activeQuery)
-        : undefined;
     const messageEvents = this.translateMessageToEvents(message, {
       suppressAssistantText: true,
       suppressReasoning: true,
-      currentContextUsage,
     });
     const assistantTimelineEvents = this.timelineAssembler
       .consume({
@@ -3481,18 +3433,6 @@ class ClaudeAgentSession implements AgentSession {
       );
 
     return [...messageEvents, ...assistantTimelineEvents];
-  }
-
-  private async queryCurrentContextUsage(
-    activeQuery: Query,
-  ): Promise<ClaudeCurrentContextUsage | undefined> {
-    try {
-      const usage = await withTimeout(activeQuery.getContextUsage(), 3_000, "timeout");
-      return readCurrentContextUsage(usage);
-    } catch (error) {
-      this.logger.debug({ err: error }, "Claude context usage query failed");
-      return undefined;
-    }
   }
 
   private async handleMissingResumedConversation(
@@ -3562,7 +3502,6 @@ class ClaudeAgentSession implements AgentSession {
     options?: {
       suppressAssistantText?: boolean;
       suppressReasoning?: boolean;
-      currentContextUsage?: ClaudeCurrentContextUsage;
     },
   ): AgentStreamEvent[] {
     const parentToolUseId =
@@ -3613,9 +3552,7 @@ class ClaudeAgentSession implements AgentSession {
         this.appendStreamEventEvents(message, events, options);
         break;
       case "result":
-        this.appendResultEvents(message, events, {
-          currentContextUsage: options?.currentContextUsage,
-        });
+        this.appendResultEvents(message, events);
         break;
       default:
         break;
@@ -3689,6 +3626,7 @@ class ClaudeAgentSession implements AgentSession {
         },
         provider: "claude",
       });
+      events.push(this.contextUsage.buildCompactionUsageEvent(compactMetadata?.postTokens));
       return;
     }
     if (message.subtype === "task_notification") {
@@ -3816,9 +3754,8 @@ class ClaudeAgentSession implements AgentSession {
   private appendResultEvents(
     message: Extract<SDKMessage, { type: "result" }>,
     events: AgentStreamEvent[],
-    options?: { currentContextUsage?: ClaudeCurrentContextUsage },
   ): void {
-    const usage = this.convertUsage(message, message.modelUsage, options?.currentContextUsage);
+    const usage = this.convertUsage(message, message.modelUsage);
     if (message.subtype === "success") {
       // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")
       // run client-side in the Claude CLI with no model turn — output_tokens
@@ -3985,12 +3922,8 @@ class ClaudeAgentSession implements AgentSession {
     return null;
   }
 
-  private convertUsage(
-    message: SDKResultMessage,
-    modelUsage?: unknown,
-    currentContextUsage?: ClaudeCurrentContextUsage,
-  ): AgentUsage | undefined {
-    return this.contextUsage.buildResultUsage(message, modelUsage, currentContextUsage);
+  private convertUsage(message: SDKResultMessage, modelUsage?: unknown): AgentUsage | undefined {
+    return this.contextUsage.buildResultUsage(message, modelUsage);
   }
 
   private handlePermissionRequest: CanUseTool = async (
@@ -4891,7 +4824,9 @@ function hasToolLikeBlock(block?: ClaudeContentChunk | null): boolean {
   return type.includes("tool");
 }
 
-function readCompactionMetadata(source: unknown): { trigger?: string; preTokens?: number } | null {
+function readCompactionMetadata(
+  source: unknown,
+): { trigger?: string; preTokens?: number; postTokens?: number } | null {
   const sourceRecord = toObjectRecord(source);
   if (!sourceRecord) {
     return null;
@@ -4909,7 +4844,9 @@ function readCompactionMetadata(source: unknown): { trigger?: string; preTokens?
     const trigger = typeof metadata.trigger === "string" ? metadata.trigger : undefined;
     const preTokensRaw = metadata.preTokens ?? metadata.pre_tokens;
     const preTokens = typeof preTokensRaw === "number" ? preTokensRaw : undefined;
-    return { trigger, preTokens };
+    const postTokensRaw = metadata.postTokens ?? metadata.post_tokens;
+    const postTokens = typeof postTokensRaw === "number" ? postTokensRaw : undefined;
+    return { trigger, preTokens, postTokens };
   }
   return null;
 }
